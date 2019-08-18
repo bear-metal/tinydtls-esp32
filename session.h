@@ -54,6 +54,8 @@ typedef struct {
     struct sockaddr_in6 sin6;
   } addr;
   int ifindex;
+  uint8_t cid[DTLS_CID_LENGTH];
+  uint8_t cidlen;
 } session_t;
 #endif /* ! WITH_CONTIKI && ! WITH_RIOT_GNRC */
 

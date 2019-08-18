@@ -94,6 +94,15 @@ typedef enum {
 #define TLS_EXT_SIG_HASH_ALGO_SHA256		4 /* see RFC 5246 */
 #define TLS_EXT_SIG_HASH_ALGO_ECDSA		3 /* see RFC 5246 */
 
+/* See https://tools.ietf.org/html/draft-ietf-tls-dtls-connection-id-05 */
+/* See https://mailarchive.ietf.org/arch/msg/tls/3wCyihI6Y7ZlciwcSDaQ322myYY */
+#define TLS_EXT_CID_TYPE 53
+
+/* Statically define CID length. This should come from ServerHello and we should really define a max here for static buffers */
+#ifndef DTLS_CID_LENGTH
+#define DTLS_CID_LENGTH 6
+#endif
+
 /** 
  * XORs \p n bytes byte-by-byte starting at \p y to the memory area
  * starting at \p x. */

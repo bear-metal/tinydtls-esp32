@@ -107,7 +107,19 @@ memarray_t dtlscontext_storage;
   }
 #endif /* DTLS_PEERS_NOHASH */
 
-#define DTLS_RH_LENGTH sizeof(dtls_record_header_t)
+/* Size of the record header. Depends on if the structure is encrypted or not and whether the DTLS CID extension is used or not. */
+#define DTLS_RECORD_HEADER(M) ((dtls_record_header_t *)(M))
+static inline size_t DTLS_RH_LENGTH(uint8 *msg, dtls_peer_t *peer) {
+  dtls_record_header_t *record = (dtls_record_header_t *) msg;
+
+  /* XXX this is a hack, figure out a better way */
+  if(dtls_get_epoch(record) > 0 && ((peer && peer->role == DTLS_SERVER) || !peer)) {
+    return sizeof(dtls_cid_header_t);
+  } else
+  {
+    return sizeof(dtls_record_header_t);
+  }
+}
 #define DTLS_HS_LENGTH sizeof(dtls_handshake_header_t)
 #define DTLS_CH_LENGTH sizeof(dtls_client_hello_t) /* no variable length fields! */
 #define DTLS_COOKIE_LENGTH_MAX 32
@@ -123,17 +135,16 @@ memarray_t dtlscontext_storage;
 #define DTLS_CV_LENGTH (1 + 1 + 2 + 1 + 1 + 1 + 1 + DTLS_EC_KEY_SIZE + 1 + 1 + DTLS_EC_KEY_SIZE)
 #define DTLS_FIN_LENGTH 12
 
-#define HS_HDR_LENGTH  DTLS_RH_LENGTH + DTLS_HS_LENGTH
-#define HV_HDR_LENGTH  HS_HDR_LENGTH + DTLS_HV_LENGTH
+#define HS_HDR_LENGTH(Msg)  DTLS_RH_LENGTH(Msg, NULL) + DTLS_HS_LENGTH
 
 #define HIGH(V) (((V) >> 8) & 0xff)
 #define LOW(V)  ((V) & 0xff)
 
-#define DTLS_RECORD_HEADER(M) ((dtls_record_header_t *)(M))
 #define DTLS_HANDSHAKE_HEADER(M) ((dtls_handshake_header_t *)(M))
 
-#define HANDSHAKE(M) ((dtls_handshake_header_t *)((M) + DTLS_RH_LENGTH))
-#define CLIENTHELLO(M) ((dtls_client_hello_t *)((M) + HS_HDR_LENGTH))
+#define HANDSHAKE(M) ((dtls_handshake_header_t *)((M) + DTLS_RH_LENGTH(M, NULL)))
+
+#define TLS_EXT_CID_LEN(N) (2 + 2 + 1 + N)
 
 /* The length check here should work because dtls_*_to_int() works on
  * unsigned char. Otherwise, broken messages could cause severe
@@ -432,22 +443,24 @@ known_content_type(const uint8_t *msg) {
  *
  */
 static unsigned int
-is_record(uint8 *msg, size_t msglen) {
+is_record(uint8 *msg, size_t msglen, dtls_peer_t *peer) {
   unsigned int rlen = 0;
 
-  if (msglen >= DTLS_RH_LENGTH) { /* FIXME allow empty records? */
+  if (msglen >= DTLS_RH_LENGTH(msg, peer)) { /* FIXME allow empty records? */
     uint16_t version = dtls_uint16_to_int(msg + 1);
     if ((((version == DTLS_VERSION) || (version == DTLS10_VERSION))
          && known_content_type(msg))) {
-        rlen = DTLS_RH_LENGTH +
+        rlen = DTLS_RH_LENGTH(msg, peer) +
 	dtls_uint16_to_int(DTLS_RECORD_HEADER(msg)->length);
 
       /* we do not accept wrong length field in record header */
-      if (rlen > msglen)
-	rlen = 0;
+      if (rlen > msglen) {
+        dtls_debug("is_record: rlen:%d larger than msglen:%d\n", rlen, msglen);
+        rlen = 0;
+      }
     }
   }
-
+  dtls_debug("is_record: msglen:%d known_content_type:%d, rlen:%d\n", msglen, known_content_type(msg), rlen);
   return rlen;
 }
 
@@ -460,8 +473,15 @@ is_record(uint8 *msg, size_t msglen) {
  */
 static inline uint8 *
 dtls_set_record_header(uint8 type, dtls_security_parameters_t *security,
+           uint8_t *cid,
+           uint8_t cidlen,
 		       uint8 *buf) {
-  dtls_int_to_uint8(buf, type);
+  
+  if(cid && security->epoch > 0) {
+    dtls_int_to_uint8(buf, DTLS_CT_TLS12_CID);
+  } else {
+    dtls_int_to_uint8(buf, type);
+  }
   buf += sizeof(uint8);
 
   dtls_int_to_uint16(buf, DTLS_VERSION);
@@ -473,6 +493,12 @@ dtls_set_record_header(uint8 type, dtls_security_parameters_t *security,
 
     dtls_int_to_uint48(buf, security->rseq);
     buf += sizeof(uint48);
+
+    if(cid && security->epoch > 0) {
+      memcpy(buf, cid, cidlen);
+      dtls_debug_dump("Sending CID", cid, cidlen);
+      buf += cidlen;
+    }
 
     /* increment record sequence counter by 1 */
     security->rseq++;
@@ -628,7 +654,7 @@ hs_attempt_with_existing_peer(uint8_t *msg, size_t msglen,
       if (msg[0] == DTLS_CT_HANDSHAKE) {
         uint16_t msg_epoch = dtls_uint16_to_int(DTLS_RECORD_HEADER(msg)->epoch);
         if (msg_epoch == 0) {
-          dtls_handshake_header_t * hs_header = DTLS_HANDSHAKE_HEADER(msg + DTLS_RH_LENGTH);
+          dtls_handshake_header_t * hs_header = DTLS_HANDSHAKE_HEADER(msg + DTLS_RH_LENGTH(msg, NULL));
           if (hs_header->msg_type == DTLS_HT_CLIENT_HELLO ||
               hs_header->msg_type == DTLS_HT_HELLO_REQUEST) {
             return 1;
@@ -827,6 +853,21 @@ calculate_key_block(dtls_context_t *ctx,
   return 0;
 }
 
+static int verify_ext_cid(uint8 *data, size_t data_length, dtls_peer_t *peer) {
+  int i;
+  /* Length of CID */
+  i = dtls_uint8_to_int(data);
+  data += sizeof(uint8);
+  if (data_length < i + sizeof(uint8))
+    dtls_alert_fatal_create(DTLS_ALERT_HANDSHAKE_FAILURE);
+
+  /* CID */
+  peer->session.cidlen = i;
+  memcpy(peer->session.cid, data, peer->session.cidlen);
+  dtls_debug_dump("Got CID", peer->session.cid, peer->session.cidlen);
+  return 0;
+}
+
 /* TODO: add a generic method which iterates over a list and searches for a specific key */
 static int verify_ext_eliptic_curves(uint8 *data, size_t data_length) {
   int i, curve_name;
@@ -912,6 +953,7 @@ dtls_check_tls_extension(dtls_peer_t *peer,
   int ext_client_cert_type = 0;
   int ext_server_cert_type = 0;
   int ext_ec_point_formats = 0;
+  //int ext_cid = 0;
   dtls_handshake_parameters_t *handshake = peer->handshake_params;
 
   if (data_length < sizeof(uint16)) {
@@ -949,6 +991,11 @@ dtls_check_tls_extension(dtls_peer_t *peer,
       goto error;
 
     switch (i) {
+      case TLS_EXT_CID_TYPE:
+        //ext_cid = 1;
+        if (verify_ext_cid(data, j, peer))
+          goto error;
+        break;
       case TLS_EXT_ELLIPTIC_CURVES:
         ext_elliptic_curve = 1;
         if (verify_ext_eliptic_curves(data, j))
@@ -1241,6 +1288,8 @@ check_finished(dtls_context_t *ctx, dtls_peer_t *peer,
   unsigned char buf[DTLS_HMAC_MAX];
   (void)ctx;
 
+  dtls_debug("dtls check_finished %d\n", data_length);
+
   if (data_length < DTLS_HS_LENGTH + DTLS_FIN_LENGTH)
     return dtls_alert_fatal_create(DTLS_ALERT_HANDSHAKE_FAILURE);
 
@@ -1320,12 +1369,12 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
   int res;
   unsigned int i;
 
-  if (*rlen < DTLS_RH_LENGTH) {
+  if (*rlen < DTLS_RH_LENGTH(sendbuf, NULL)) {
     dtls_alert("The sendbuf (%zu bytes) is too small\n", *rlen);
     return dtls_alert_fatal_create(DTLS_ALERT_INTERNAL_ERROR);
   }
 
-  p = dtls_set_record_header(type, security, sendbuf);
+  p = dtls_set_record_header(type, security, peer->session.cid, peer->session.cidlen, sendbuf);
   start = p;
 
   if (!security || security->cipher == TLS_NULL_WITH_NULL_NULL) {
@@ -1334,7 +1383,7 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
     res = 0;
     for (i = 0; i < data_array_len; i++) {
       /* check the minimum that we need for packets that are not encrypted */
-      if (*rlen < res + DTLS_RH_LENGTH + data_len_array[i]) {
+      if (*rlen < res + DTLS_RH_LENGTH(sendbuf, NULL) + data_len_array[i]) {
         dtls_debug("dtls_prepare_record: send buffer too small\n");
         return dtls_alert_fatal_create(DTLS_ALERT_INTERNAL_ERROR);
       }
@@ -1346,9 +1395,14 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
   } else { /* TLS_PSK_WITH_AES_128_CCM_8 or TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8 */
     /**
      * length of additional_data for the AEAD cipher which consists of
+     * 1) Without CID
      * seq_num(2+6) + type(1) + version(2) + length(2)
+     * 2) With CID
+     * seq_num(2+6) + type(1) + version(2) + cid(6) + cid_length(1) + length(2)
      */
-#define A_DATA_LEN 13
+/* XXX we should use cidlen and make this a static inline function */
+#define A_DATA_LEN 13 + DTLS_CID_LENGTH + 1
+
     unsigned char nonce[DTLS_CCM_BLOCKSIZE];
     unsigned char A_DATA[A_DATA_LEN];
 
@@ -1406,7 +1460,7 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
 
     for (i = 0; i < data_array_len; i++) {
       /* check the minimum that we need for packets that are not encrypted */
-      if (*rlen < res + DTLS_RH_LENGTH + data_len_array[i]) {
+      if (*rlen < res + DTLS_RH_LENGTH(sendbuf, NULL) + data_len_array[i]) {
         dtls_debug("dtls_prepare_record: send buffer too small\n");
         return dtls_alert_fatal_create(DTLS_ALERT_INTERNAL_ERROR);
       }
@@ -1415,6 +1469,10 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
       p += data_len_array[i];
       res += data_len_array[i];
     }
+    /* wrap CID inner type */
+    *p = type;
+    p++;
+    res++;
 
     memset(nonce, 0, DTLS_CCM_BLOCKSIZE);
     memcpy(nonce, dtls_kb_local_iv(security, peer->role),
@@ -1426,13 +1484,24 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
 		    dtls_kb_key_size(security, peer->role));
 
     /* re-use N to create additional data according to RFC 5246, Section 6.2.3.3:
-     *
+     * 1) without DTLS CID
      * additional_data = seq_num + TLSCompressed.type +
      *                   TLSCompressed.version + TLSCompressed.length;
+     * 2) with DTLS CID
+     * additional_data = seq_num +
+     *                   tls12_cid +
+     *                   DTLSCipherText.version +
+     *                   cid +
+     *                   cid_length +
+     *                   length_of_DTLSInnerPlaintext;
      */
+
+    /* XXX branch on cidlen > 0 */
     memcpy(A_DATA, &DTLS_RECORD_HEADER(sendbuf)->epoch, 8); /* epoch and seq_num */
     memcpy(A_DATA + 8,  &DTLS_RECORD_HEADER(sendbuf)->content_type, 3); /* type and version */
-    dtls_int_to_uint16(A_DATA + 11, res - 8); /* length */
+    memcpy(A_DATA + 8 + 3, &peer->session.cid, peer->session.cidlen); /* cid &  */
+    memcpy(A_DATA + 8 + 3 + peer->session.cidlen, &peer->session.cidlen, 1); /* cid_length */
+    dtls_int_to_uint16(A_DATA + 8 + 3 + peer->session.cidlen + 1, res - 8); /* length */
 
     res = dtls_encrypt(start + 8, res - 8, start + 8, nonce,
 		       dtls_kb_local_write_key(security, peer->role),
@@ -1447,9 +1516,9 @@ dtls_prepare_record(dtls_peer_t *peer, dtls_security_parameters_t *security,
   }
 
   /* fix length of fragment in sendbuf */
-  dtls_int_to_uint16(sendbuf + 11, res);
+  dtls_int_to_uint16(start - 2, res);
 
-  *rlen = DTLS_RH_LENGTH + res;
+  *rlen = DTLS_RH_LENGTH(sendbuf, NULL) + res;
   return 0;
 }
 
@@ -1520,7 +1589,7 @@ dtls_send_handshake_msg(dtls_context_t *ctx,
    ((Data) != NULL) && ((Length) > 0)  &&				\
    ((Data)[0] != DTLS_HT_HELLO_VERIFY_REQUEST) &&			\
    ((Data)[0] != DTLS_HT_CLIENT_HELLO ||				\
-    ((Length) >= HS_HDR_LENGTH &&					\
+    ((Length) >= HS_HDR_LENGTH(Data) &&					\
      (dtls_uint16_to_int(DTLS_RECORD_HEADER(Data)->epoch > 0) ||	\
       (dtls_uint16_to_int(HANDSHAKE(Data)->message_seq) > 0)))))
 
@@ -1887,13 +1956,13 @@ dtls_send_server_hello(dtls_context_t *ctx, dtls_peer_t *peer)
   uint8 buf[DTLS_SH_LENGTH + 2 + 5 + 5 + 8 + 6];
   uint8 *p;
   int ecdsa;
-  uint8 extension_size;
+  uint8 extensions_size;
   dtls_handshake_parameters_t *handshake = peer->handshake_params;
   dtls_tick_t now;
 
   ecdsa = is_tls_ecdhe_ecdsa_with_aes_128_ccm_8(handshake->cipher);
 
-  extension_size = (ecdsa) ? 2 + 5 + 5 + 6 : 0;
+  extensions_size = (ecdsa) ? 5 + 5 + 6 : 0;
 
   /* Handshake header */
   p = buf;
@@ -1922,9 +1991,9 @@ dtls_send_server_hello(dtls_context_t *ctx, dtls_peer_t *peer)
     *p++ = compression_methods[handshake->compression];
   }
 
-  if (extension_size) {
+  if (extensions_size) {
     /* length of the extensions */
-    dtls_int_to_uint16(p, extension_size - 2);
+    dtls_int_to_uint16(p, extensions_size);
     p += sizeof(uint16);
   }
 
@@ -2475,7 +2544,8 @@ dtls_send_client_hello(dtls_context_t *ctx, dtls_peer_t *peer,
   uint8 buf[DTLS_CH_LENGTH_MAX];
   uint8 *p = buf;
   uint8_t cipher_size;
-  uint8_t extension_size;
+  uint8_t extensions_size = 0;
+  uint8_t ecdsa_size;
   int psk;
   int ecdsa;
   dtls_handshake_parameters_t *handshake = peer->handshake_params;
@@ -2485,7 +2555,12 @@ dtls_send_client_hello(dtls_context_t *ctx, dtls_peer_t *peer,
   ecdsa = is_ecdsa_supported(ctx, 1);
 
   cipher_size = 2 + ((ecdsa) ? 2 : 0) + ((psk) ? 2 : 0);
-  extension_size = (ecdsa) ? 2 + 6 + 6 + 8 + 6: 0;
+
+  ecdsa_size = 6 + 6 + 8 + 6;
+  extensions_size += (ecdsa) ? ecdsa_size : 0;
+
+  /* CID len of 0 means we're willing to send with a CID but do not with the server to do so */
+  extensions_size += TLS_EXT_CID_LEN(0);
 
   if (cipher_size == 0) {
     dtls_crit("no cipher callbacks implemented\n");
@@ -2543,11 +2618,20 @@ dtls_send_client_hello(dtls_context_t *ctx, dtls_peer_t *peer,
   dtls_int_to_uint8(p, TLS_COMPRESSION_NULL);
   p += sizeof(uint8);
 
-  if (extension_size) {
+  if (extensions_size) {
     /* length of the extensions */
-    dtls_int_to_uint16(p, extension_size - 2);
+    dtls_int_to_uint16(p, extensions_size);
     p += sizeof(uint16);
   }
+
+  /* Send zero length CID to server, indicating that we are ready to
+  * send with a CID but wish the server not to do so. */
+  dtls_int_to_uint16(p, TLS_EXT_CID_TYPE);
+  p += sizeof(uint16);
+  dtls_int_to_uint16(p, 1); // overall length
+  p += sizeof(uint16);
+  dtls_int_to_uint8(p, 0); // cid length
+  p += sizeof(uint8);
 
   if (ecdsa) {
     /* client certificate type extension */
@@ -3783,7 +3867,7 @@ dtls_handle_message(dtls_context_t *ctx,
     dtls_debug("dtls_handle_message: FOUND PEER\n");
   }
 
-  while ((rlen = is_record(msg,msglen))) {
+  while ((rlen = is_record(msg,msglen, peer))) {
     dtls_peer_type role;
     dtls_state_t state;
 
@@ -3836,8 +3920,8 @@ dtls_handle_message(dtls_context_t *ctx,
       }
       if (data_length < 0) {
         if (hs_attempt_with_existing_peer(msg, rlen, peer)) {
-          data = msg + DTLS_RH_LENGTH;
-          data_length = rlen - DTLS_RH_LENGTH;
+          data = msg + DTLS_RH_LENGTH(msg, NULL);
+          data_length = rlen - DTLS_RH_LENGTH(msg, NULL);
           state = DTLS_STATE_WAIT_CLIENTHELLO;
           role = DTLS_SERVER;
         } else {
@@ -3857,8 +3941,8 @@ dtls_handle_message(dtls_context_t *ctx,
       }
     } else {
       /* is_record() ensures that msg contains at least a record header */
-      data = msg + DTLS_RH_LENGTH;
-      data_length = rlen - DTLS_RH_LENGTH;
+      data = msg + DTLS_RH_LENGTH(msg, NULL);
+      data_length = rlen - DTLS_RH_LENGTH(msg, NULL);
       state = DTLS_STATE_WAIT_CLIENTHELLO;
       role = DTLS_SERVER;
     }

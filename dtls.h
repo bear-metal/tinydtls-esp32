@@ -316,6 +316,7 @@ void dtls_check_retransmit(dtls_context_t *context, clock_time_t *next);
 #define DTLS_CT_ALERT              21
 #define DTLS_CT_HANDSHAKE          22
 #define DTLS_CT_APPLICATION_DATA   23
+#define DTLS_CT_TLS12_CID          25
 
 /** Generic header structure of the DTLS record layer. */
 typedef struct __attribute__((__packed__)) {
@@ -326,6 +327,17 @@ typedef struct __attribute__((__packed__)) {
   uint16 length;		/**< length of the following fragment */
   /* fragment */
 } dtls_record_header_t;
+
+/** Header structure of the DTLS record layer with . */
+typedef struct __attribute__((__packed__)) {
+  uint8 content_type;		/**< tls12_cid */
+  uint16 version;		/**< Protocol version */
+  uint16 epoch;		        /**< counter for cipher state changes */
+  uint48 sequence_number;       /**< sequence number */
+  uint8_t cid[DTLS_CID_LENGTH]; /* TLS12_CID */
+  uint16 length;		/**< length of the following fragment */
+  /* enc_content */
+} dtls_cid_header_t;
 
 /* Handshake types */
 
