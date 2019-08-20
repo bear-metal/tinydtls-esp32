@@ -135,8 +135,6 @@ get_psk_info(struct dtls_context_t *ctx UNUSED_PARAM,
 
     memcpy(result, psk_key, psk_key_length);
     return psk_key_length;
-  case DTLS_PSK_HINT:
-    return 0;
   default:
     dtls_warn("unsupported request type: %d\n", type);
   }
@@ -249,7 +247,7 @@ resolve_address(const char *server, struct sockaddr *dst) {
   struct addrinfo *res, *ainfo;
   struct addrinfo hints;
   static char addrstr[256];
-  int error;
+  int error, result;
 
   memset(addrstr, 0, sizeof(addrstr));
   if (server && strlen(server) > 0)
@@ -261,28 +259,30 @@ resolve_address(const char *server, struct sockaddr *dst) {
   hints.ai_socktype = SOCK_DGRAM;
   hints.ai_family = AF_UNSPEC;
 
-  error = getaddrinfo(addrstr, "", &hints, &res);
+  error = getaddrinfo(addrstr, NULL, &hints, &res);
 
   if (error != 0) {
     fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(error));
     return error;
   }
 
-  for (ainfo = res; ainfo != NULL; ainfo = ainfo->ai_next) {
+  result = -1;
+  for (ainfo = res; (result == -1) && (ainfo != NULL); ainfo = ainfo->ai_next) {
 
     switch (ainfo->ai_family) {
     case AF_INET6:
     case AF_INET:
 
       memcpy(dst, ainfo->ai_addr, ainfo->ai_addrlen);
-      return ainfo->ai_addrlen;
+      result = ainfo->ai_addrlen;
+      break;
     default:
       ;
     }
   }
 
   freeaddrinfo(res);
-  return -1;
+  return result;
 }
 
 /*---------------------------------------------------------------------------*/

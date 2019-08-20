@@ -47,6 +47,7 @@ Td3[x] = Si[x].[09, 0d, 0b, 0e];
 Td4[x] = Si[x].[01, 01, 01, 01];
 */
 
+#ifndef ESPIDF_VERSION
 static const aes_u32 Te0[256] = {
     0xc66363a5U, 0xf87c7c84U, 0xee777799U, 0xf67b7b8dU,
     0xfff2f20dU, 0xd66b6bbdU, 0xde6f6fb1U, 0x91c5c554U,
@@ -377,6 +378,8 @@ static const aes_u32 Te4[256] = {
     0x41414141U, 0x99999999U, 0x2d2d2d2dU, 0x0f0f0f0fU,
     0xb0b0b0b0U, 0x54545454U, 0xbbbbbbbbU, 0x16161616U,
 };
+#endif /* ! ESPIDF_VERSION */
+
 
 #ifdef WITH_AES_DECRYPT
 
@@ -713,15 +716,18 @@ static const aes_u32 Td4[256] = {
 
 #endif /* WITH_AES_DECRYPT */
 
+#ifndef ESPIDF_VERSION
 static const aes_u32 rcon[] = {
 	0x01000000, 0x02000000, 0x04000000, 0x08000000,
 	0x10000000, 0x20000000, 0x40000000, 0x80000000,
 	0x1B000000, 0x36000000, /* for 128-bit blocks, Rijndael never uses more than 10 rcon values */
 };
+#endif /* ! ESPIDF_VERSION */
 
 #define GETU32(pt) (((aes_u32)(pt)[0] << 24) ^ ((aes_u32)(pt)[1] << 16) ^ ((aes_u32)(pt)[2] <<  8) ^ ((aes_u32)(pt)[3]))
 #define PUTU32(ct, st) { (ct)[0] = (aes_u8)((st) >> 24); (ct)[1] = (aes_u8)((st) >> 16); (ct)[2] = (aes_u8)((st) >>  8); (ct)[3] = (aes_u8)(st); }
 
+#ifndef ESPIDF_VERSION
 /**
  * Expand the cipher key into the encryption key schedule.
  *
@@ -808,6 +814,7 @@ rijndaelKeySetupEnc(aes_u32 rk[/*4*(Nr + 1)*/], const aes_u8 cipherKey[], int ke
 	}
 	return 0;
 }
+#endif /* ! ESPIDF_VERSION */
 
 #ifdef WITH_AES_DECRYPT
 /**
@@ -859,6 +866,7 @@ rijndaelKeySetupDec(aes_u32 rk[/*4*(Nr + 1)*/], const aes_u8 cipherKey[], int ke
 }
 #endif
 
+#ifndef ESPIDF_VERSION
 void
 rijndaelEncrypt(const aes_u32 rk[/*4*(Nr + 1)*/], int Nr, const aes_u8 pt[16],
     aes_u8 ct[16])
@@ -1042,6 +1050,7 @@ rijndaelEncrypt(const aes_u32 rk[/*4*(Nr + 1)*/], int Nr, const aes_u8 pt[16],
 		rk[3];
 	PUTU32(ct + 12, s3);
 }
+#endif /* ! ESPIDF_VERSION */
 
 #ifdef WITH_AES_DECRYPT
 static void

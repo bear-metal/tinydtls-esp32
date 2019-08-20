@@ -24,13 +24,32 @@
 #include "global.h"
 
 #ifdef WITH_SHA256
+#ifdef RIOT_VERSION
+#include "hashes/sha256.h"
+
+typedef sha256_context_t dtls_hash_ctx;
+typedef sha256_context_t dtls_sha256_ctx;
+#define DTLS_HASH_CTX_SIZE sizeof(sha256_context_t)
+#define DTLS_SHA256_DIGEST_LENGTH (SHA256_DIGEST_LENGTH)
+
+#define dtls_sha256_init(Ctx)             sha256_init((Ctx))
+#define dtls_sha256_update(Ctx,Input,Len) sha256_update((Ctx), (Input), (Len))
+#define dtls_sha256_final(Buf,Ctx)        sha256_final((Ctx), (Buf))
+
+#else /* RIOT_VERSION */
+
 /** Aaron D. Gifford's implementation of SHA256
  *  see http://www.aarongifford.com/ */
 #include "sha2/sha2.h"
 
 typedef dtls_sha256_ctx dtls_hash_ctx;
-typedef dtls_hash_ctx *dtls_hash_t;
 #define DTLS_HASH_CTX_SIZE sizeof(dtls_sha256_ctx)
+
+#endif /* RIOT_VERSION */
+
+
+typedef dtls_hash_ctx *dtls_hash_t;
+
 
 static inline void
 dtls_hash_init(dtls_hash_t ctx) {

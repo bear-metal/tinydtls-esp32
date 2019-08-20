@@ -22,6 +22,9 @@ dnl AC_CONFIG_HEADERS([config.h])
 AC_PATH_PROG(DOXYGEN, doxygen, [:])
 AC_PATH_PROG(ETAGS, etags, [/bin/false])
 
+# Make configure happy
+test -e install-sh || touch install-sh
+
 # Checks for programs.
 AC_PROG_MAKE_SET
 AC_PROG_CC
@@ -29,6 +32,8 @@ AC_PROG_RANLIB
 m4_ifdef([AM_PROG_AR], [AM_PROG_AR], [AR=ar])
 
 AC_C_BIGENDIAN
+
+CFLAGS="-fPIC"
 
 # Adding some default warning options for code QS
 # see https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html
